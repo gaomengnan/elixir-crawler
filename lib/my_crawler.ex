@@ -1,8 +1,8 @@
 defmodule MyCrawler do
   use HTTPoison.Base
 
-  alias MyCrawler.{Repo, Douban}
-  import Ecto.Query, warn: false
+  alias MyCrawler.{Repo, Douban, Resource}
+  import Ecto.Query, only: [from: 2], warn: false
 
   # alias Douban
 
@@ -88,7 +88,8 @@ defmodule MyCrawler do
       score: data[:rate],
       comment_count: data[:comment_num],
       cover: data[:cover],
-      desc: data[:base_comment]
+      desc: data[:base_comment],
+      resource_id: data[:resource_id]
     }
 
     case create_or_update(douban) do
@@ -148,6 +149,16 @@ defmodule MyCrawler do
       |> Floki.find(".pic a img")
       |> Floki.attribute("src")
       |> List.first()
+
+    resource_id =
+      case download_cover(cover) do
+        {:ok, id} ->
+          id
+
+        {:error, reason} ->
+          IO.puts("Failed to download cover: #{reason}")
+          nil
+      end
 
     # 链接
     href =
@@ -221,7 +232,8 @@ defmodule MyCrawler do
       desc: desc,
       rate: rate,
       comment_num: comment_num,
-      base_comment: best_comment
+      base_comment: best_comment,
+      resource_id: resource_id
     }
   end
 
@@ -254,7 +266,7 @@ defmodule MyCrawler do
 
     urls
     |> Enum.map(&Task.async(fn -> fetch_per_page(&1) end))
-    |> Enum.flat_map(&Task.await(&1, 5000))
+    |> Enum.flat_map(&Task.await(&1, 50000))
 
     # |> Enum.map(fn item ->  end)
 
@@ -285,6 +297,53 @@ defmodule MyCrawler do
 
       {:error, reason} ->
         IO.puts("Failed to fetch page: #{reason}")
+    end
+  end
+
+  defp image_exists?(md5_hash) do
+    query = from(r in Resource, where: r.md5_hash == ^md5_hash, select: r.id)
+
+    case Repo.one(query) do
+      nil -> :not_found
+      id -> {:ok, id}
+    end
+  end
+
+  def download_cover(url) do
+    IO.puts("start to download cover: #{url}")
+
+    case get(url) do
+      {:ok, %HTTPoison.Response{status_code: 200, body: body}} ->
+        b64_data = Base.encode64(body)
+
+        md5_hash =
+          :crypto.hash(:md5, body)
+          |> Base.encode16(case: :lower)
+
+        case image_exists?(md5_hash) do
+          :not_found ->
+            # insert
+            IO.puts("image not found in db: #{md5_hash}")
+            changeset = Resource.changeset(%Resource{}, %{data: b64_data, md5_hash: md5_hash})
+
+            case Repo.insert(changeset) do
+              {:ok, resource} ->
+                {:ok, resource.id}
+
+              {:error, changeset} ->
+                IO.puts("Failed to insert resource: #{inspect(changeset)}")
+                {:error, :insert_failed}
+            end
+
+          {:ok, id} ->
+            {:ok, id}
+        end
+
+      {:ok, %HTTPoison.Response{status_code: status_code}} ->
+        {:error, "Failed to download image. Status code: #{status_code}"}
+
+      {:error, %HTTPoison.Error{reason: reason}} ->
+        {:error, "Failed to download image. Reason: #{reason}"}
     end
   end
 end
